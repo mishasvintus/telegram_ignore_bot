@@ -69,6 +69,8 @@ class UserHandler:
             while not self.unread_queue.empty():
                 chat_id, msg = await self.unread_queue.get()
                 await self.user_client.send_read_acknowledge(chat_id, msg)
+                if self.MARK_AS_UNREAD:
+                    await self.user_client(functions.messages.MarkDialogUnreadRequest(peer=chat_id, unread=True))
 
     # noinspection PyTypeChecker
     def reload_ignored_chats(self):
