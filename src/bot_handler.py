@@ -8,6 +8,11 @@ from telethon.tl.types import BotCommand
 import datetime
 
 
+def custom_decoder(dct):
+    return {int(key) if key.isdigit() or (len(key) > 1 and key[0] == '-' and key[1:].isdigit()) else key: value for
+            key, value in dct.items()}
+
+
 class BotHandler:
     def __init__(self, queue_from_bot, queue_to_bot, keys_path="../config/keys.json",
                  ignored_chats_path="../config/ignored_chats.json",
@@ -37,7 +42,7 @@ class BotHandler:
         self.reload_event = asyncio.Event()
         self.initialize_event = asyncio.Event()
         self.all_chats_buffer = []
-        self.ignored_chats_buffer = []
+        self.ignored_chats_buffer = {}
 
         self.bot_client = TelegramClient(bot_session_path, self.API_ID, self.API_HASH,
                                          system_version='4.16.30-vxCUSTOM')
@@ -108,7 +113,7 @@ class BotHandler:
         await self.send_chat_management_page(event, 0)
 
     async def send_chat_management_page(self, event, page_num):
-        pages = [self.ignored_chats_buffer[i:i + self.management_chats_per_page]
+        pages = [list(self.ignored_chats_buffer.items())[i:i + self.management_chats_per_page]
                  for i in range(0, len(self.ignored_chats_buffer), self.management_chats_per_page)]
         if page_num < 0 or page_num >= len(pages):
             await event.edit("Некорректная страница.", buttons=self.back_button())
@@ -116,15 +121,13 @@ class BotHandler:
 
         page = pages[page_num]
         text = f"Страница {page_num + 1}/{len(pages)}\nВыберите чат для управления:\n\n"
-        for idx, chat in enumerate(page, start=page_num * self.management_chats_per_page + 1):
+        for idx, (chat_id, chat) in enumerate(page, start=page_num * self.management_chats_per_page + 1):
             text += f"{idx}. {chat['name']}\n"
 
         buttons = []
-        # Для каждой кнопки перед именем чата добавляем эмодзи:
-        # 🔔 если mark_this_as_unread == True, иначе 🔕
-        for chat in page:
+        for chat_id, chat in page:
             emoji = "🔔" if chat.get("mark_this_as_unread", False) else "🔕"
-            buttons.append([Button.inline(f"{emoji} {chat['name']}", data=f"manage_chat_{chat['id']}_page_{page_num}")])
+            buttons.append([Button.inline(f"{emoji} {chat['name']}", data=f"manage_chat_{chat_id}_page_{page_num}")])
 
         nav_buttons = []
         if page_num > 0:
@@ -139,31 +142,31 @@ class BotHandler:
         await event.edit(text, buttons=buttons)
 
     async def show_individual_chat_management(self, event, chat_id, page_num):
-        chat = next((ch for ch in self.ignored_chats_buffer if ch["id"] == chat_id), None)
-        if not chat:
+        if chat_id not in self.ignored_chats_buffer.keys():
             await event.answer("Чат не найден!", alert=True)
             return
 
-        status_text = "Включено" if chat.get("mark_this_as_unread", False) else "Выключено"
+        mark_this_as_unread = self.ignored_chats_buffer[chat_id].get("mark_this_as_unread", False)
+        status_text = "Включено" if mark_this_as_unread else "Выключено"
         text = (f"Управление чатом:\n\n"
-                f"Название: {chat['name']}\n"
-                f"ID: {chat['id']}\n"
+                f"Название: {self.ignored_chats_buffer[chat_id]['name']}\n"
+                f"ID: {chat_id}\n"
                 f"Помечается непрочитанным: {status_text}\n\n"
                 f"Выберите действие:")
         buttons = [
-            [Button.inline("❌ Удалить чат", data=f"remove_chat_{chat['id']}_page_{page_num}")],
-            [Button.inline("↩️ Переключить отметку", data=f"toggle_unread_{chat['id']}_page_{page_num}")],
+            [Button.inline("❌ Удалить чат", data=f"remove_chat_{chat_id}_page_{page_num}")],
+            [Button.inline("↩️ Переключить отметку", data=f"toggle_unread_{chat_id}_page_{page_num}")],
             [Button.inline("🔙 Назад", data=f"page_manage_{page_num}")]
         ]
         await event.edit(text, buttons=buttons)
 
     async def toggle_unread_handler(self, event, chat_id, page_num):
-        chat = next((ch for ch in self.ignored_chats_buffer if ch["id"] == chat_id), None)
-        if not chat:
+        if chat_id not in self.ignored_chats_buffer.keys():
             await event.answer("Чат не найден!", alert=True)
             return
 
-        chat["mark_this_as_unread"] = not chat.get("mark_this_as_unread", False)
+        self.ignored_chats_buffer[chat_id]["mark_this_as_unread"] = not self.ignored_chats_buffer[chat_id].get(
+            "mark_this_as_unread", False)
         with open(self.IGNORED_CHATS_PATH, "w", encoding="utf-8") as f:
             json.dump(self.ignored_chats_buffer, f, indent=4)
 
@@ -171,8 +174,9 @@ class BotHandler:
         self.reload_event.clear()
         await self.reload_event.wait()
 
-        status_text = "Включено" if chat["mark_this_as_unread"] else "Выключено"
-        answer_text = f"Теперь{' ' if chat['mark_this_as_unread'] else ' не '}помечается непрочитанным"
+        mark_this_as_unread = self.ignored_chats_buffer[chat_id].get("mark_this_as_unread", False)
+        status_text = "Включено" if mark_this_as_unread else "Выключено"
+        answer_text = f"Теперь{' ' if mark_this_as_unread else ' не '}помечается непрочитанным"
         await event.answer(answer_text, alert=True)
         await self.show_individual_chat_management(event, chat_id, page_num)
 
@@ -180,26 +184,25 @@ class BotHandler:
         parts = data.split("_")
         chat_id = int(parts[2])
         page_num = int(parts[4])
-        chat_to_remove = next((ch for ch in self.ignored_chats_buffer if ch["id"] == chat_id), None)
-
-        if not chat_to_remove:
+        if chat_id not in self.ignored_chats_buffer.keys():
             await event.answer("Чат не найден!", alert=True)
             return
 
-        self.ignored_chats_buffer = [ch for ch in self.ignored_chats_buffer if ch["id"] != chat_id]
+        chat_removed = self.ignored_chats_buffer.pop(chat_id)
         with open(self.IGNORED_CHATS_PATH, "w", encoding="utf-8") as f:
             json.dump(self.ignored_chats_buffer, f, indent=4)
 
         await self.queue_from_bot.put("RELOAD_CHATS")
         self.reload_event.clear()
         await self.reload_event.wait()
-        await event.answer(f"Чат {chat_to_remove['name']} удалён!", alert=True)
+        await event.answer(f"Чат {chat_removed['name']} удалён!", alert=True)
 
         if page_num == -1:
             return
 
-        pages = [self.ignored_chats_buffer[i:i + self.management_chats_per_page]
+        pages = [list(self.ignored_chats_buffer.items())[i:i + self.management_chats_per_page]
                  for i in range(0, len(self.ignored_chats_buffer), self.management_chats_per_page)]
+
         if pages:
             if page_num >= len(pages):
                 page_num = max(0, len(pages) - 1)
@@ -215,7 +218,7 @@ class BotHandler:
         with open(self.ALL_CHATS_PATH, "r", encoding="utf-8") as f:
             self.all_chats_buffer = json.load(f)
         with open(self.IGNORED_CHATS_PATH, "r", encoding="utf-8") as f:
-            self.ignored_chats_buffer = json.load(f)
+            self.ignored_chats_buffer = json.load(f, object_hook=custom_decoder)
 
         await event.answer("Список чатов обновлён!", alert=True)
 
@@ -224,20 +227,19 @@ class BotHandler:
 
     async def add_chat_handler(self, event, data):
         chat_id = int(data.split("_")[2])
-        chat_to_add = next((ch for ch in self.all_chats_buffer if ch["id"] == chat_id), None)
+        chat_to_add = next((ch for ch in self.all_chats_buffer if ch["id"] == int(chat_id)), None)
 
         if not chat_to_add:
             await event.answer("Чат не найден!", alert=True)
             return
 
-        if any(ch["id"] == chat_id for ch in self.ignored_chats_buffer):
+        if chat_id in self.ignored_chats_buffer.keys():
             await event.answer("Этот чат уже добавлен!", alert=True)
             return
 
-        if "mark_this_as_unread" not in chat_to_add:
-            chat_to_add["mark_this_as_unread"] = False
+        self.ignored_chats_buffer[chat_to_add["id"]] = {"name": chat_to_add["name"],
+                                                        "mark_this_as_unread": False}
 
-        self.ignored_chats_buffer.append(chat_to_add)
         with open(self.IGNORED_CHATS_PATH, "w", encoding="utf-8") as f:
             json.dump(self.ignored_chats_buffer, f, indent=4)
 
@@ -281,7 +283,7 @@ class BotHandler:
         with open(self.ALL_CHATS_PATH, "r", encoding="utf-8") as f:
             self.all_chats_buffer = json.load(f)
         with open(self.IGNORED_CHATS_PATH, "r", encoding="utf-8") as f:
-            self.ignored_chats_buffer = json.load(f)
+            self.ignored_chats_buffer = json.load(f, object_hook=custom_decoder)
 
         print(f"{datetime.datetime.now()}\n🔴BotHandler🔴: Бот-клиент запущен.")
 

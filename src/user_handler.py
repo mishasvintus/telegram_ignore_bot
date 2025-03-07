@@ -6,6 +6,12 @@ from telethon.tl.types import UserStatusOnline
 import datetime
 from telethon import functions
 
+
+def custom_decoder(dct):
+    return {int(key) if key.isdigit() or (len(key) > 1 and key[0] == '-' and key[1:].isdigit()) else key: value for
+            key, value in dct.items()}
+
+
 class UserHandler:
     def __init__(self, queue_from_bot, queue_to_bot, keys_path="../config/keys.json",
                  ignored_chats_path="../config/ignored_chats.json",
@@ -27,7 +33,6 @@ class UserHandler:
 
         if not os.path.exists(config_path):
             config = {
-                "READ_NEW_POSTS": True,
                 "STAY_OFFLINE": True
             }
             with open(config_path, "w", encoding="utf-8") as f:
@@ -37,7 +42,6 @@ class UserHandler:
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
-            self.MARK_AS_UNREAD = config["MARK_AS_UNREAD"]
             self.STAY_OFFLINE = config["STAY_OFFLINE"]
 
         except Exception as e:
@@ -48,11 +52,21 @@ class UserHandler:
 
         self.queue_from_bot = queue_from_bot
         self.queue_to_bot = queue_to_bot
-        self.chat_ids = []
-        self.user_client = TelegramClient(user_session_path, self.API_ID, self.API_HASH, system_version='4.16.30-vxCUSTOM')
+        self.ignored_chats_buffer = {}
+        self.user_client = TelegramClient(user_session_path, self.API_ID, self.API_HASH,
+                                          system_version='4.16.30-vxCUSTOM')
         self.unread_queue = asyncio.Queue()
 
         self.user_client.on(events.UserUpdate(chats=self.USER_ID))(self.handle_user_update)
+
+    async def is_chat_read(self, chat_id):
+        peer = await self.user_client.get_input_entity(chat_id)
+        result = await self.user_client(functions.messages.GetPeerDialogsRequest(peers=[peer]))
+
+        if result.dialogs:
+            dialog = result.dialogs[0]
+            return dialog.unread_count == 0
+        return None
 
     async def handle_chat_message(self, event):
         status = (await self.user_client.get_me()).status
@@ -60,30 +74,31 @@ class UserHandler:
             await self.unread_queue.put((event.chat_id, event.message))
         else:
             await self.user_client.send_read_acknowledge(event.chat_id, event.message)
-            if self.MARK_AS_UNREAD:
+            if self.ignored_chats_buffer[event.chat_id]['mark_this_as_unread']:
+                await asyncio.sleep(0.3)
+                if await self.is_chat_read(event.chat_id):
+                    return
                 await self.user_client(functions.messages.MarkDialogUnreadRequest(peer=event.chat_id, unread=True))
-
 
     async def handle_user_update(self, event):
         if isinstance(event.status, UserStatusOnline):
             while not self.unread_queue.empty():
                 chat_id, msg = await self.unread_queue.get()
                 await self.user_client.send_read_acknowledge(chat_id, msg)
-                if self.MARK_AS_UNREAD:
+                if self.ignored_chats_buffer[chat_id]['mark_this_as_unread']:
                     await self.user_client(functions.messages.MarkDialogUnreadRequest(peer=chat_id, unread=True))
 
     # noinspection PyTypeChecker
     def reload_ignored_chats(self):
         if not os.path.exists(self.IGNORED_CHATS_PATH):
             with open(self.IGNORED_CHATS_PATH, "w", encoding="utf-8") as f:
-                json.dump([], f, ensure_ascii=False, indent=4)
+                json.dump({}, f, ensure_ascii=False, indent=4)
 
         with open(self.IGNORED_CHATS_PATH, "r", encoding="utf-8") as f:
-            ignored_chats = json.load(f)
-        self.chat_ids = [channel["id"] for channel in ignored_chats]
+            self.ignored_chats_buffer = json.load(f, object_hook=custom_decoder)
 
         self.user_client.remove_event_handler(self.handle_chat_message)
-        self.user_client.on(events.NewMessage(chats=self.chat_ids))(self.handle_chat_message)
+        self.user_client.on(events.NewMessage(chats=list(self.ignored_chats_buffer.keys())))(self.handle_chat_message)
 
     # noinspection PyTypeChecker
     async def initialize_all_chats(self):
