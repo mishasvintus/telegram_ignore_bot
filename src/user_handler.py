@@ -73,11 +73,11 @@ class UserHandler:
         if self.STAY_OFFLINE and not isinstance(status, UserStatusOnline):
             await self.unread_queue.put((event.chat_id, event.message))
         else:
+            await asyncio.sleep(0.3)
+            if await self.is_chat_read(event.chat_id):
+                return
             await self.user_client.send_read_acknowledge(event.chat_id, event.message)
             if self.ignored_chats_buffer[event.chat_id]['mark_this_as_unread']:
-                await asyncio.sleep(0.3)
-                if await self.is_chat_read(event.chat_id):
-                    return
                 await self.user_client(functions.messages.MarkDialogUnreadRequest(peer=event.chat_id, unread=True))
 
     async def handle_user_update(self, event):
